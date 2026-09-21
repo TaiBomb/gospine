@@ -31,6 +31,15 @@ type flatConfig struct {
 	ReadTimeout  time.Duration `env:"readTimeout"   default:"5s"`
 	WriteTimeout time.Duration `env:"writeTimeout"  default:"5s"`
 
+	TelemetryEnabled      bool          `env:"telemetry.enabled"       default:"false"`
+	TelemetryExporter     string        `env:"telemetry.exporter"      default:"prometheus"`
+	TelemetryServiceName  string        `env:"telemetry.serviceName"`
+	TelemetryPort         int           `env:"telemetry.port"          default:"9464"`
+	TelemetryPath         string        `env:"telemetry.path"          default:"/metrics"`
+	TelemetryInterval     time.Duration `env:"telemetry.interval"      default:"30s"`
+	TelemetryOTLPEndpoint string        `env:"telemetry.otlp.endpoint"`
+	TelemetryOTLPInsecure bool          `env:"telemetry.otlp.insecure" default:"false"`
+
 	Upstream upstream
 }
 
@@ -86,10 +95,50 @@ func TestBase_Defaults(t *testing.T) {
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 5 * time.Second,
 		},
+		Telemetry: Telemetry{
+			Enabled:  false,
+			Exporter: "prometheus",
+			Port:     9464,
+			Path:     "/metrics",
+			Interval: 30 * time.Second,
+		},
 	}
 
 	if cfg.Base != want {
 		t.Fatalf("expected %+v, got %+v", want, cfg.Base)
+	}
+}
+
+func TestBase_TelemetryKeys(t *testing.T) {
+	t.Setenv("port", "1")
+	t.Setenv("upstream.baseUrl", "http://upstream")
+	t.Setenv("telemetry.enabled", "true")
+	t.Setenv("telemetry.exporter", "otlp")
+	t.Setenv("telemetry.serviceName", "svc")
+	t.Setenv("telemetry.port", "0")
+	t.Setenv("telemetry.path", "/prom")
+	t.Setenv("telemetry.interval", "10s")
+	t.Setenv("telemetry.otlp.endpoint", "http://collector:4318")
+	t.Setenv("telemetry.otlp.insecure", "true")
+
+	cfg, err := envconfig.Load[embeddedConfig]()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := Telemetry{
+		Enabled:      true,
+		Exporter:     "otlp",
+		ServiceName:  "svc",
+		Port:         0,
+		Path:         "/prom",
+		Interval:     10 * time.Second,
+		OTLPEndpoint: "http://collector:4318",
+		OTLPInsecure: true,
+	}
+
+	if cfg.Telemetry != want {
+		t.Fatalf("expected %+v, got %+v", want, cfg.Telemetry)
 	}
 }
 

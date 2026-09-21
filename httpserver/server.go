@@ -1,6 +1,8 @@
 // Package httpserver runs a gin engine with a Huma API mounted under
 // {contextPath}/api, the /health and /status probes, and the request logging,
 // request id and panic recovery middlewares every service shares.
+// With telemetry enabled it also records the HTTP server metrics and,
+// when telemetry.port is 0, serves the scrape endpoint.
 //
 // The service contributes its operations as Modules. Engine and API stay
 // reachable for anything the options do not cover.
@@ -16,6 +18,7 @@ import (
 	"github.com/TaiBomb/gospine/apidoc"
 	"github.com/TaiBomb/gospine/config"
 	"github.com/TaiBomb/gospine/logging"
+	"github.com/TaiBomb/gospine/telemetry"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 	"github.com/gin-gonic/gin"
@@ -30,18 +33,27 @@ type Server struct {
 }
 
 // New builds the server and registers every route; it does not listen yet.
+// With telemetry enabled, call telemetry.Setup first.
 func New(opts Options) *Server {
 	gin.SetMode(gin.ReleaseMode)
 
 	engine := gin.New()
 
+	// Probes and scrapes: logged at debug level only, left out of the metrics.
+	quiet := []string{
+		path.Join("/", opts.Config.ContextPath, "health"),
+		path.Join("/", opts.Config.ContextPath, "status"),
+	}
+	if _, scrapePath, ok := telemetry.Handler(); ok {
+		quiet = append(quiet, path.Join("/", opts.Config.ContextPath, scrapePath))
+	}
+
+	if telemetry.Enabled() && !opts.DisableMetrics {
+		engine.Use(Metrics(WithoutRoutes(quiet...)))
+	}
+
 	engine.Use(
-		RequestLogger(
-			WithQuietPaths(
-				path.Join("/", opts.Config.ContextPath, "health"),
-				path.Join("/", opts.Config.ContextPath, "status"),
-			),
-		),
+		RequestLogger(WithQuietPaths(quiet...)),
 		Recovery(),
 	)
 	engine.Use(opts.Middlewares...)
@@ -76,6 +88,11 @@ func (s *Server) registerRoutes(opts Options) {
 
 	base.GET("/health", health)
 	base.GET("/status", status)
+
+	// Outside /api: no API middlewares, no OpenAPI entry.
+	if scrape, scrapePath, ok := telemetry.Handler(); ok {
+		base.GET(scrapePath, gin.WrapH(scrape))
+	}
 
 	apiGroup := base.Group("/api", opts.APIMiddlewares...)
 	s.api = humagin.NewWithGroup(

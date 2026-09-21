@@ -10,7 +10,8 @@ API on [gin](https://gin-gonic.com), optionally reading their data from
 
 It holds what every such service would otherwise copy: logging with request
 correlation, configuration, the outbound HTTP client, the HTTP server with its
-middlewares and probes, the OpenAPI setup, pagination and PayloadCMS helpers.
+middlewares and probes, the OpenAPI setup, pagination, PayloadCMS helpers and
+OpenTelemetry metrics.
 The domain — operations, DTOs, collections — stays in the service.
 
 ## Install
@@ -31,11 +32,13 @@ go get github.com/TaiBomb/gospine
 | `paging`        | `Page[T]`, `PagedResponse[T]`, `NormalizePagination`, `NewInMemoryPage`                                           |
 | `pcms`          | PayloadCMS `Client`, internal API key auth, `Upstream` error mapping, `NewPage`, `BuildSort`, `UnmarshalRelation` |
 | `pcms/pcmstest` | `MockClient` for handler tests                                                                                    |
+| `telemetry`     | OpenTelemetry metrics: `Setup` (Prometheus or OTLP), `Meter` for the service's own metrics, `Enabled`, `Handler`  |
 
 Dependencies between packages only go one way: `logging`, `config`, `paging`
-and `apidoc` import nothing from the module; `httpclient` uses `logging`;
-`httpserver` uses `logging`, `config`, `apidoc`; `pcms` uses `logging`,
-`paging` and `pcms` is the only package depending on gopcms (see
+and `apidoc` import nothing from the module; `telemetry` uses `logging`,
+`config`; `httpclient` uses `logging`, `telemetry`; `httpserver` uses
+`logging`, `config`, `apidoc`, `telemetry`; `pcms` uses `logging`, `paging`,
+`telemetry` and `pcms` is the only package depending on gopcms (see
 [Without PayloadCMS](#without-payloadcms)).
 
 ## Usage
@@ -54,6 +57,9 @@ type EnvConfig struct {
 
 	PayloadCMS pcms.Config // payloadCms.baseUrl, payloadCms.apiUrl
 }
+
+// First: the client and the server check whether telemetry is on.
+shutdownTelemetry, err := telemetry.Setup(context.Background(), cfg.Telemetry, telemetry.Service{Name: "example"})
 
 httpClient := httpclient.New(httpclient.Options{Timeout: cfg.Client.Timeout})
 
@@ -83,6 +89,7 @@ Services usually have a local `httpserver` package too: import this one as
 | `GET {contextPath}/status`                                                      | pings `Status.Probe` within `pingTimeout`: `200` or `503 {"status":"error","error":"<dependency> unreachable"}`; without a probe, like `/health` |
 | `{contextPath}/api/{module prefix}/...`                                         | the module's Huma operations                                                                                                                     |
 | `{contextPath}/api/openapi.json`, `/openapi.yaml`, `/openapi-3.0.json`, `/docs` | the generated document                                                                                                                           |
+| `GET {contextPath}{telemetry.path}`                                             | the Prometheus scrape, only with `telemetry.enabled=true` and `telemetry.port=0` (see [Metrics](#metrics))                                       |
 
 ### Configuration keys
 
@@ -101,10 +108,23 @@ Keys are flat and unchanged by embedding:
 | `payloadCms.baseUrl` | required (only with `pcms.Config`) |
 | `payloadCms.apiUrl`  | `/api` (only with `pcms.Config`)   |
 
+The telemetry keys come with `config.Base` as well:
+
+| Key                       | Default                                               |
+|---------------------------|-------------------------------------------------------|
+| `telemetry.enabled`       | `false`                                               |
+| `telemetry.exporter`      | `prometheus`; or `otlp`                               |
+| `telemetry.serviceName`   | the name passed to `telemetry.Setup`                  |
+| `telemetry.port`          | `9464`; `0` serves the metrics on the main server     |
+| `telemetry.path`          | `/metrics`                                            |
+| `telemetry.interval`      | `30s` (otlp push interval)                            |
+| `telemetry.otlp.endpoint` | empty: the `OTEL_EXPORTER_OTLP_*` variables apply     |
+| `telemetry.otlp.insecure` | `false`                                               |
+
 ### Access log
 
 One `Request handled` line per request: error on 5xx, warn on 4xx, debug
-otherwise (always debug for `/health` and `/status`). Fields: `status`,
+otherwise (always debug for `/health`, `/status` and the scrape endpoint). Fields: `status`,
 `method`, `path`, `latency`, `latency_ms`, `resp_size_bytes`, and when present
 `query`, `path_params`, `user_agent`, `req_size_bytes`, `req_body` (textual
 bodies of POST/PUT/PATCH/DELETE, 4 KiB cap), `req_body_truncated`,
@@ -113,6 +133,68 @@ bodies of POST/PUT/PATCH/DELETE, 4 KiB cap), `req_body_truncated`,
 Every request gets its own id, returned in `X-Request-ID`; an incoming
 `X-Request-ID` is kept as `correlation_id` when it is printable ASCII of at
 most 128 characters.
+
+## Metrics
+
+Off by default: with `telemetry.enabled=false` no provider is installed, no
+port is opened and no middleware is registered. The service calls
+`telemetry.Setup` once, before building the client and the server, and shuts
+it down after the server:
+
+```go
+shutdownTelemetry, err := telemetry.Setup(context.Background(), cfg.Telemetry, telemetry.Service{Name: "rt-rsa-api"})
+if err != nil {
+	logging.Log.Fatal("Cannot set up telemetry", "err", err)
+}
+
+// httpclient.New, pcms.New, spine.New, Start, <-ctx.Done(), server.Shutdown(shutdownCtx)
+
+if err := shutdownTelemetry(shutdownCtx); err != nil {
+	logging.Log.Error("Telemetry shutdown failed", "error", err)
+}
+```
+
+The rest is configuration:
+
+| Mode                                 | Keys                                                 | Metrics                                                                                                                                                                                                  |
+|--------------------------------------|------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Prometheus, dedicated port (default) | `telemetry.port=9464`                                | served on `:9464/metrics`: out of the ingress, of the API traffic and of `readTimeout` / `writeTimeout`                                                                                                  |
+| Prometheus, main server              | `telemetry.port=0`                                   | served on `{contextPath}{telemetry.path}` of the API server, outside `/api` and the OpenAPI document, under its `readTimeout` / `writeTimeout`; reachable wherever the API port is, the ingress included |
+| OTLP                                 | `telemetry.exporter=otlp`, `telemetry.otlp.endpoint` | pushed over OTLP/HTTP every `telemetry.interval`, and once more on shutdown; `/v1/metrics` is appended to an endpoint without a path                                                                     |
+
+`service.name` is `telemetry.serviceName`, else the name passed to `Setup`;
+`OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` win over both.
+`service.version` is `Service.Version`, else the module version stamped in the
+binary.
+
+| OpenTelemetry                                                     | Prometheus                                                                           | Type      | Attributes                                                                                                     |
+|-------------------------------------------------------------------|--------------------------------------------------------------------------------------|-----------|----------------------------------------------------------------------------------------------------------------|
+| `http.server.request.duration`                                    | `http_server_request_duration_seconds`                                               | histogram | `http.request.method`, `http.route`, `http.response.status_code`, `url.scheme`, `error.type` (5xx only)        |
+| `http.server.active_requests`                                     | `http_server_active_requests`                                                        | gauge     | `http.request.method`, `url.scheme`                                                                            |
+| `http.server.request.body.size`, `http.server.response.body.size` | `http_server_request_body_size_bytes`, `http_server_response_body_size_bytes`        | histogram | as the duration                                                                                                |
+| `http.client.request.duration`, `http.client.request.body.size`   | `http_client_request_duration_seconds`, `http_client_request_body_size_bytes`        | histogram | `http.request.method`, `server.address`, `server.port`, `http.response.status_code`, `error.type`, `network.*` |
+| `payloadcms.client.request.duration`                              | `payloadcms_client_request_duration_seconds`                                         | histogram | `http.request.method`, `payloadcms.collection`, `http.response.status_code`, `error.type`                      |
+| `payloadcms.client.requests`                                      | `payloadcms_client_requests_total`                                                   | counter   | as above                                                                                                       |
+| Go runtime                                                        | `go_memory_used_bytes`, `go_goroutine_count`, `go_memory_gc_goal_bytes`, `go_*`, ... | various   |                                                                                                                |
+| resource                                                          | `target_info`                                                                        | info      | `service.name`, `service.version`, `process.runtime.*`, `telemetry.sdk.*`                                      |
+
+Every series also carries `otel_scope_name`, the package that records it.
+
+- `http.route` is the route template (`/api/items/:id`), never the raw path;
+  unrouted requests carry none, and methods outside the standard ones are
+  `_OTHER`. No attribute holds a path, query, id or header.
+- `/health`, `/status` and the scrape endpoint are not recorded.
+- Server-sent event streams last as long as the client listens: they stay out
+  of the duration and response size, and still count in `active_requests` and
+  in the request size, whose `_count` is the number of streams opened.
+- Durations use the semconv buckets, 5ms to 10s; the server adds 30s and 60s
+  for exports and PDFs. Sizes go from 256 B to 64 MiB.
+- PayloadCMS calls show up twice, on purpose: in `http.client.*` by host, as
+  the transport sees them, and in `payloadcms.client.*` by collection, once per
+  attempt, so each retry counts. `payloadcms.collection` is the first segment
+  after the API prefix (`globals/<slug>` for globals, `root` for the prefix
+  itself, `_OTHER` outside it); `error.type` is `http_<status>`, `timeout`,
+  `canceled`, `network` or `invalid_response`.
 
 ## Without PayloadCMS
 
@@ -137,7 +219,7 @@ specific to a service lives in the service and plugs in here:
 
 | Need                                                                   | How                                                                                                                               |
 |------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| A gin middleware on every route                                        | `Options.Middlewares` (runs after the access log and recovery)                                                                    |
+| A gin middleware on every route                                        | `Options.Middlewares` (runs after the metrics, the access log and recovery)                                                       |
 | A gin middleware on `/api` only                                        | `Options.APIMiddlewares`                                                                                                          |
 | A middleware on one module only                                        | `api.UseMiddleware(...)` inside `Module.Register` (Huma middleware)                                                               |
 | Routes outside the Huma API                                            | `Server.Engine()`                                                                                                                 |
@@ -146,7 +228,10 @@ specific to a service lives in the service and plugs in here:
 | Any dependency in `/status`                                            | `Status.Probe`, `ProbeFunc`                                                                                                       |
 | TLS, proxy, custom dialer or instrumented transport for outbound calls | `httpclient.Options.Transport` (any `http.RoundTripper`; `X-Request-ID` is still forwarded)                                       |
 | Any PayloadCMS collection, or a type composed around the connection    | `pcms.Client.Raw()`                                                                                                               |
-| Middlewares, OpenAPI config or HTTP client without `Server`            | `RequestLogger`, `Recovery`, `HeaderForwarder`, `apidoc.NewConfig`, `httpclient.New` work on their own                            |
+| Middlewares, OpenAPI config or HTTP client without `Server`            | `RequestLogger`, `Recovery`, `HeaderForwarder`, `Metrics`, `apidoc.NewConfig`, `httpclient.New` work on their own                 |
+| Metrics of the service's own                                           | `telemetry.Meter(name)`: same provider and exporter, no-op while telemetry is off                                                 |
+| No HTTP server metrics on one server                                   | `Options.DisableMetrics`                                                                                                          |
+| The scrape endpoint on a server built without `Server`                 | mount `telemetry.Handler()`, which answers `ok` only with the Prometheus exporter and `telemetry.port=0`                          |
 | Different settings or defaults                                         | `config.Base` is a plain struct: declare your own fields instead of embedding it                                                  |
 
 The built-in routes keep their access log behavior when replaced: `/health`

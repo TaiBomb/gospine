@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"github.com/TaiBomb/gospine/logging"
+	"github.com/TaiBomb/gospine/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // HTTPClient is a reusable wrapper around net/http.Client.
@@ -14,7 +16,9 @@ type HTTPClient struct {
 }
 
 // New creates an HTTPClient that forwards the request id of the request
-// being served on every outbound call, custom Transport included.
+// being served on every outbound call, custom Transport included. With
+// telemetry enabled it also records the OpenTelemetry HTTP client metrics:
+// call telemetry.Setup first.
 func New(opts Options) *HTTPClient {
 	opts = opts.withDefaults()
 
@@ -25,6 +29,11 @@ func New(opts Options) *HTTPClient {
 			MaxIdleConnsPerHost: opts.MaxIdleConnsPerHost,
 			IdleConnTimeout:     opts.IdleConnTimeout,
 		}
+	}
+
+	// Below the forwarder, so what is measured is the request actually sent.
+	if telemetry.Enabled() {
+		transport = otelhttp.NewTransport(transport)
 	}
 
 	return &HTTPClient{

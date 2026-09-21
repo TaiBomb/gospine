@@ -23,19 +23,7 @@ func New(cfg Config, httpClient *http.Client) (Client, error) {
 		gopcms.WithHTTPClient(httpClient),
 		gopcms.WithAPIPrefix(cfg.APIURL),
 		gopcms.WithAuth(internalAPIKeyAuth{}),
-		gopcms.WithObserver(gopcms.ObserverFunc{
-			Response: func(ctx context.Context, method, url string, statusCode int, duration time.Duration, err error) {
-				logging.FromContext(ctx).Debug(
-					"payloadcms call",
-					"method", method,
-					"url", url,
-					"status", statusCode,
-					"duration", duration.String(),
-					"duration_ms", logging.Millis(duration),
-					"err", err,
-				)
-			},
-		}),
+		gopcms.WithObserver(newObserver(cfg)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create gopcms client: %w", err)
@@ -44,6 +32,28 @@ func New(cfg Config, httpClient *http.Client) (Client, error) {
 	return &client{
 		pcms: pcms,
 	}, nil
+}
+
+// newObserver logs every attempt, retries included, at debug level and
+// records it in the PayloadCMS client metrics.
+func newObserver(cfg Config) gopcms.Observer {
+	metrics := newClientMetrics(cfg)
+
+	return gopcms.ObserverFunc{
+		Response: func(ctx context.Context, method, url string, statusCode int, duration time.Duration, err error) {
+			logging.FromContext(ctx).Debug(
+				"payloadcms call",
+				"method", method,
+				"url", url,
+				"status", statusCode,
+				"duration", duration.String(),
+				"duration_ms", logging.Millis(duration),
+				"err", err,
+			)
+
+			metrics.record(ctx, method, url, statusCode, duration, err)
+		},
+	}
 }
 
 // Ping issues a GET against PayloadCMS's /access endpoint.

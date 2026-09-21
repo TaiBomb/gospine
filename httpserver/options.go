@@ -58,4 +58,8 @@ type Options struct {
 	Middlewares []gin.HandlerFunc
 	// APIMiddlewares run on the /api group only.
 	APIMiddlewares []gin.HandlerFunc
+
+	// DisableMetrics keeps this server out of the HTTP server metrics even
+	// when telemetry is enabled.
+	DisableMetrics bool
 }

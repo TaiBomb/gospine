@@ -19,8 +19,10 @@ import (
 	"github.com/TaiBomb/gospine/httpclient"
 	spine "github.com/TaiBomb/gospine/httpserver"
 	"github.com/TaiBomb/gospine/logging"
+	"github.com/TaiBomb/gospine/telemetry"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // EnvConfig is the configuration of the service: no PayloadCMS keys.
@@ -54,7 +56,7 @@ type searchOutput struct {
 	}
 }
 
-func registerSearch(api huma.API, _ searchClient) {
+func registerSearch(api huma.API, _ searchClient, queries metric.Int64Counter) {
 	// A Huma middleware added here applies to this module only.
 	api.UseMiddleware(func(ctx huma.Context, next func(huma.Context)) {
 		ctx.SetHeader("Cache-Control", "no-store")
@@ -67,6 +69,7 @@ func registerSearch(api huma.API, _ searchClient) {
 		Path:        "/query",
 		Summary:     "Search",
 	}, func(ctx context.Context, _ *struct{}) (*searchOutput, error) {
+		queries.Add(ctx, 1)
 		return &searchOutput{}, nil
 	})
 }
@@ -81,6 +84,14 @@ func main() {
 
 	logging.SetLevel(cfg.LogLevel)
 
+	metrics, err := telemetry.Setup(context.Background(), cfg.Telemetry, telemetry.Service{Name: "search"})
+	if err != nil {
+		logging.Log.Fatal("Cannot set up telemetry", "err", err)
+	}
+
+	// A metric of the service's own, next to the ones gospine records.
+	queries, _ := telemetry.Meter("search").Int64Counter("search.queries")
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -91,7 +102,7 @@ func main() {
 		Config: cfg.Server,
 		APIDoc: apidoc.Info{Title: "Search API", Version: "1.0.0"},
 		Modules: []spine.Module{
-			{Prefix: "/search", Tag: "Search", Register: func(api huma.API) { registerSearch(api, search) }},
+			{Prefix: "/search", Tag: "Search", Register: func(api huma.API) { registerSearch(api, search, queries) }},
 		},
 		Status: spine.Status{
 			Probe: spine.ProbeFunc(func(ctx context.Context) error {
@@ -107,7 +118,7 @@ func main() {
 	})
 
 	// Routes outside the Huma API go straight on the engine.
-	server.Engine().GET("/metrics", func(c *gin.Context) { c.Status(http.StatusOK) })
+	server.Engine().GET("/version", func(c *gin.Context) { c.String(http.StatusOK, "1.0.0") })
 
 	if err := server.Start(); err != nil {
 		logging.Log.Fatal("Cannot start server", "err", err)
@@ -120,5 +131,8 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logging.Log.Error("Server forced to shutdown", "error", err)
+	}
+	if err := metrics(shutdownCtx); err != nil {
+		logging.Log.Error("Telemetry shutdown failed", "error", err)
 	}
 }

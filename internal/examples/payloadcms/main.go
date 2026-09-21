@@ -20,6 +20,7 @@ import (
 	spine "github.com/TaiBomb/gospine/httpserver"
 	"github.com/TaiBomb/gospine/logging"
 	"github.com/TaiBomb/gospine/pcms"
+	"github.com/TaiBomb/gospine/telemetry"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
 )
@@ -67,6 +68,12 @@ func main() {
 		logging.SetLevel(cfg.LogLevel)
 	}
 
+	// Before the client and the server, which record on what it installs.
+	metrics, err := telemetry.Setup(context.Background(), cfg.Telemetry, telemetry.Service{Name: "example"})
+	if err != nil {
+		logging.Log.Fatal("Cannot set up telemetry", "err", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -108,6 +115,9 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logging.Log.Error("Server forced to shutdown", "error", err)
+	}
+	if err := metrics(shutdownCtx); err != nil {
+		logging.Log.Error("Telemetry shutdown failed", "error", err)
 	}
 
 	logging.Log.Info("STOPPED Service example")
