@@ -153,51 +153,115 @@ func countOf(counts map[attribute.Distinct]metricdata.DataPoint[int64], attrs ..
 	return counts[set.Equivalent()].Value
 }
 
+func TestCollections_Label(t *testing.T) {
+	c := &collections{confirmed: map[string]struct{}{}}
+
+	steps := []struct {
+		collection string
+		statusCode int
+		want       string
+	}{
+		{"strutture", http.StatusNotFound, "_OTHER"},
+		{"strutture", 0, "_OTHER"},
+		{"strutture", http.StatusOK, "strutture"},
+		{"strutture", http.StatusNotFound, "strutture"},
+		{"strutture", 0, "strutture"},
+		{"invented", http.StatusNotFound, "_OTHER"},
+		{"invented", http.StatusInternalServerError, "_OTHER"},
+	}
+
+	for i, step := range steps {
+		if got := c.label(step.collection, step.statusCode); got != step.want {
+			t.Fatalf("step %d: %s with %d: expected %q, got %q", i, step.collection, step.statusCode, step.want, got)
+		}
+	}
+}
+
+func TestCollections_AreCapped(t *testing.T) {
+	c := &collections{confirmed: map[string]struct{}{}}
+
+	for i := range maxCollections {
+		name := fmt.Sprintf("c%d", i)
+		if got := c.label(name, http.StatusOK); got != name {
+			t.Fatalf("expected %q under the cap, got %q", name, got)
+		}
+	}
+
+	if got := c.label("one-too-many", http.StatusOK); got != "_OTHER" {
+		t.Fatalf("expected _OTHER past the cap, got %q", got)
+	}
+	if got := c.label("c0", http.StatusOK); got != "c0" {
+		t.Fatalf("expected a confirmed collection to keep its name, got %q", got)
+	}
+}
+
 func TestNew_RecordsPayloadCMSCalls(t *testing.T) {
 	reader := withMetricsReader(t)
 
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/globals/footer" {
+		switch r.URL.Path {
+		case "/api/strutture/missing", "/api/invented":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"errors":[{"message":"Not Found"}]}`))
-			return
+		default:
+			_, _ = w.Write([]byte(`{"id":"64f1a2b3"}`))
 		}
-		_, _ = w.Write([]byte(`{"id":"64f1a2b3"}`))
 	})
 
 	ctx := context.Background()
 	_ = c.Raw().Do(ctx, http.MethodGet, "/strutture/64f1a2b3", url.Values{"depth": {"1"}}, nil, nil)
+	_ = c.Raw().Do(ctx, http.MethodGet, "/strutture/missing", nil, nil, nil)
 	_ = c.Raw().Do(ctx, http.MethodGet, "/globals/footer", nil, nil, nil)
+	// A collection chosen by a caller, which PayloadCMS does not have.
+	_ = c.Raw().Do(ctx, http.MethodGet, "/invented", nil, nil, nil)
 
 	counts := requestCounts(t, reader)
-	if len(counts) != 2 {
-		t.Fatalf("expected two series, got %v", counts)
+	if len(counts) != 4 {
+		t.Fatalf("expected four series, got %v", counts)
 	}
 
-	if got := countOf(counts,
-		semconv.HTTPRequestMethodKey.String("GET"),
-		collectionKey.String("strutture"),
-		semconv.HTTPResponseStatusCode(http.StatusOK),
-	); got != 1 {
-		t.Errorf("expected one successful call on strutture, got %d (%v)", got, counts)
+	tests := []struct {
+		name  string
+		attrs []attribute.KeyValue
+	}{
+		{"success on strutture", []attribute.KeyValue{
+			semconv.HTTPRequestMethodKey.String("GET"),
+			collectionKey.String("strutture"),
+			semconv.HTTPResponseStatusCode(http.StatusOK),
+		}},
+		{"failure on the confirmed strutture", []attribute.KeyValue{
+			semconv.HTTPRequestMethodKey.String("GET"),
+			collectionKey.String("strutture"),
+			semconv.HTTPResponseStatusCode(http.StatusNotFound),
+			semconv.ErrorTypeKey.String("http_404"),
+		}},
+		{"success on a global", []attribute.KeyValue{
+			semconv.HTTPRequestMethodKey.String("GET"),
+			collectionKey.String("globals/footer"),
+			semconv.HTTPResponseStatusCode(http.StatusOK),
+		}},
+		{"failure on an unknown collection", []attribute.KeyValue{
+			semconv.HTTPRequestMethodKey.String("GET"),
+			collectionKey.String("_OTHER"),
+			semconv.HTTPResponseStatusCode(http.StatusNotFound),
+			semconv.ErrorTypeKey.String("http_404"),
+		}},
 	}
 
-	if got := countOf(counts,
-		semconv.HTTPRequestMethodKey.String("GET"),
-		collectionKey.String("globals/footer"),
-		semconv.HTTPResponseStatusCode(http.StatusNotFound),
-		semconv.ErrorTypeKey.String("http_404"),
-	); got != 1 {
-		t.Errorf("expected one failed call on globals/footer, got %d (%v)", got, counts)
+	for _, tt := range tests {
+		if got := countOf(counts, tt.attrs...); got != 1 {
+			t.Errorf("%s: expected one call, got %d (%v)", tt.name, got, counts)
+		}
 	}
 }
 
 func TestObserver_CountsEveryRetry(t *testing.T) {
 	reader := withMetricsReader(t)
 
+	// The first call confirms the collection, the second fails once and is retried.
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
+		if calls.Add(1) == 2 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -217,8 +281,10 @@ func TestObserver_CountsEveryRetry(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := raw.Do(context.Background(), http.MethodGet, "/strutture", nil, nil, nil); err != nil {
-		t.Fatalf("expected the retry to succeed, got %v", err)
+	for range 2 {
+		if err := raw.Do(context.Background(), http.MethodGet, "/strutture", nil, nil, nil); err != nil {
+			t.Fatalf("expected the call to succeed, retry included, got %v", err)
+		}
 	}
 
 	counts := requestCounts(t, reader)
@@ -235,7 +301,7 @@ func TestObserver_CountsEveryRetry(t *testing.T) {
 		semconv.HTTPResponseStatusCode(http.StatusOK),
 	)
 
-	if failed != 1 || succeeded != 1 {
+	if failed != 1 || succeeded != 2 {
 		t.Fatalf("expected each attempt to count once, got %d failed and %d succeeded (%v)", failed, succeeded, counts)
 	}
 }

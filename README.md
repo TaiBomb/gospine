@@ -195,6 +195,10 @@ Every series also carries `otel_scope_name`, the package that records it.
   after the API prefix (`globals/<slug>` for globals, `root` for the prefix
   itself, `_OTHER` outside it); `error.type` is `http_<status>`, `timeout`,
   `canceled`, `network` or `invalid_response`.
+- A collection name becomes a label only after PayloadCMS has answered 2xx for
+  it, and at most 64 do: a service may take the collection from the caller, and
+  an invented one, answered 404, stays `_OTHER`. So do the calls to a
+  collection made before its first success.
 
 ## Without PayloadCMS
 

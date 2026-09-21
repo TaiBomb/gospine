@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TaiBomb/gospine/telemetry"
@@ -23,15 +24,21 @@ const meterName = "github.com/TaiBomb/gospine/pcms"
 // globals/<slug>, a PayloadCMS call went to.
 const collectionKey = attribute.Key("payloadcms.collection")
 
-// otherCollection stands for a URL outside the API path.
+// otherCollection stands for a URL outside the API path, or a collection
+// PayloadCMS has not confirmed yet.
 const otherCollection = "_OTHER"
+
+// maxCollections caps the payloadcms.collection values of a client, on top of
+// the confirmation rule of collections.
+const maxCollections = 64
 
 // clientMetrics sees every attempt through the gopcms Observer: they sit
 // above the HTTP client metrics, split by collection instead of by host.
 type clientMetrics struct {
-	apiPath  string
-	duration metric.Float64Histogram
-	requests metric.Int64Counter
+	apiPath     string
+	collections *collections
+	duration    metric.Float64Histogram
+	requests    metric.Int64Counter
 }
 
 // newClientMetrics creates the instruments once, on the global provider:
@@ -56,16 +63,17 @@ func newClientMetrics(cfg Config) clientMetrics {
 	}
 
 	return clientMetrics{
-		apiPath:  apiPath(cfg),
-		duration: duration,
-		requests: requests,
+		apiPath:     apiPath(cfg),
+		collections: &collections{confirmed: map[string]struct{}{}},
+		duration:    duration,
+		requests:    requests,
 	}
 }
 
 func (m clientMetrics) record(ctx context.Context, method, rawURL string, statusCode int, duration time.Duration, err error) {
 	attrs := []attribute.KeyValue{
 		semconv.HTTPRequestMethodKey.String(method),
-		collectionKey.String(collectionFromURL(m.apiPath, rawURL)),
+		collectionKey.String(m.collections.label(collectionFromURL(m.apiPath, rawURL), statusCode)),
 	}
 	if statusCode != 0 {
 		attrs = append(attrs, semconv.HTTPResponseStatusCode(statusCode))
@@ -77,6 +85,38 @@ func (m clientMetrics) record(ctx context.Context, method, rawURL string, status
 	set := metric.WithAttributeSet(attribute.NewSet(attrs...))
 	m.duration.Record(ctx, duration.Seconds(), set)
 	m.requests.Add(ctx, 1, set)
+}
+
+// collections keeps payloadcms.collection bounded when the collection comes
+// from the caller, as with the PDFs of risorse-service: a name becomes a label
+// only once PayloadCMS has answered 2xx for it, so an invented one, answered
+// 404, stays _OTHER. Calls made before that first success are _OTHER as well.
+type collections struct {
+	mu        sync.RWMutex
+	confirmed map[string]struct{}
+}
+
+func (c *collections) label(collection string, statusCode int) string {
+	c.mu.RLock()
+	_, confirmed := c.confirmed[collection]
+	c.mu.RUnlock()
+
+	if confirmed {
+		return collection
+	}
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return otherCollection
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.confirmed) >= maxCollections {
+		return otherCollection
+	}
+	c.confirmed[collection] = struct{}{}
+
+	return collection
 }
 
 // apiPath is what gopcms puts before every call: the path of the base URL and
