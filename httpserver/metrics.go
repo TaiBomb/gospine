@@ -53,17 +53,10 @@ func WithoutRoutes(routes ...string) MetricsOption {
 	}
 }
 
-// Metrics records the OpenTelemetry HTTP server metrics on the global
-// MeterProvider: http.server.request.duration, http.server.active_requests,
-// http.server.request.body.size and http.server.response.body.size.
-//
-// http.route is the route template, never the raw path; unrouted requests
-// carry none. Server-sent event streams last as long as the client listens,
-// so they stay out of the duration and response size histograms; they still
-// count in active_requests and request.body.size.
-//
-// Register it before RequestLogger and Recovery, so a recovered panic is
-// recorded as a 500.
+// Metrics records OpenTelemetry HTTP metrics, including request duration,
+// active requests, body sizes, and SSE duration, events, and time to first event.
+// Routes use http.route templates; SSE metrics include sse.outcome.
+// Register before RequestLogger and Recovery to capture recovered panics as 500s.
 func Metrics(opts ...MetricsOption) gin.HandlerFunc {
 	var cfg metricsConfig
 	for _, opt := range opts {
@@ -76,9 +69,10 @@ func Metrics(opts ...MetricsOption) gin.HandlerFunc {
 	active, errActive := httpconv.NewServerActiveRequests(meter)
 	requestSize, errRequestSize := httpconv.NewServerRequestBodySize(meter)
 	responseSize, errResponseSize := httpconv.NewServerResponseBodySize(meter)
+	streams, errStreams := newStreamMetrics(meter)
 
 	// A failed instrument is a no-op one: report it and keep serving.
-	if err := errors.Join(errDuration, errActive, errRequestSize, errResponseSize); err != nil {
+	if err := errors.Join(errDuration, errActive, errRequestSize, errResponseSize, errStreams); err != nil {
 		otel.Handle(err)
 	}
 
@@ -100,6 +94,9 @@ func Metrics(opts ...MetricsOption) gin.HandlerFunc {
 		// Deferred, so the count stays right even if a panic is not recovered.
 		defer active.Inst().Add(ctx, -1, activeAttrs)
 
+		stream := &streamWriter{ResponseWriter: c.Writer, start: start}
+		c.Writer = stream
+
 		c.Next()
 
 		status := c.Writer.Status()
@@ -118,6 +115,7 @@ func Metrics(opts ...MetricsOption) gin.HandlerFunc {
 		}
 
 		if isEventStream(c.Writer.Header()) {
+			streams.record(ctx, route, stream)
 			return
 		}
 

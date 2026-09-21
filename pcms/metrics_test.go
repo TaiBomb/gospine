@@ -73,6 +73,27 @@ func TestCollectionFromURL(t *testing.T) {
 	}
 }
 
+func TestUnpaginated(t *testing.T) {
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"http://cms/api/strutture?pagination=false&depth=1", true},
+		{"http://cms/api/strutture?pagination=true", false},
+		{"http://cms/api/strutture?limit=10", false},
+		{"http://cms/api/strutture?where%5Bnome%5D%5Bequals%5D=pagination%3Dfalse", false},
+		{"://not a url", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			if got := unpaginated(tt.url); got != tt.want {
+				t.Fatalf("expected %v, got %v", tt.want, got)
+			}
+		})
+	}
+}
+
 type timeoutError struct{}
 
 func (timeoutError) Error() string   { return "i/o timeout" }
@@ -303,5 +324,35 @@ func TestObserver_CountsEveryRetry(t *testing.T) {
 
 	if failed != 1 || succeeded != 2 {
 		t.Fatalf("expected each attempt to count once, got %d failed and %d succeeded (%v)", failed, succeeded, counts)
+	}
+}
+
+func TestNew_MarksUnpaginatedCalls(t *testing.T) {
+	reader := withMetricsReader(t)
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"docs":[]}`))
+	})
+
+	ctx := context.Background()
+	_ = c.Raw().Do(ctx, http.MethodGet, "/strutture", url.Values{"limit": {"10"}}, nil, nil)
+	_ = c.Raw().Do(ctx, http.MethodGet, "/strutture", url.Values{"pagination": {"false"}}, nil, nil)
+
+	counts := requestCounts(t, reader)
+
+	paginated := countOf(counts,
+		semconv.HTTPRequestMethodKey.String("GET"),
+		collectionKey.String("strutture"),
+		semconv.HTTPResponseStatusCode(http.StatusOK),
+	)
+	unpaginated := countOf(counts,
+		semconv.HTTPRequestMethodKey.String("GET"),
+		collectionKey.String("strutture"),
+		paginatedKey.Bool(false),
+		semconv.HTTPResponseStatusCode(http.StatusOK),
+	)
+
+	if paginated != 1 || unpaginated != 1 {
+		t.Fatalf("expected one call of each kind, got %d paginated and %d unpaginated (%v)", paginated, unpaginated, counts)
 	}
 }

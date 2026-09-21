@@ -22,7 +22,6 @@ import (
 	"github.com/TaiBomb/gospine/telemetry"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
-	"go.opentelemetry.io/otel/metric"
 )
 
 // EnvConfig is the configuration of the service: no PayloadCMS keys.
@@ -50,13 +49,16 @@ func tenantMiddleware() gin.HandlerFunc {
 	}
 }
 
+// queries is a service-specific metric alongside those recorded by gospine
+var queries = telemetry.NewCounter("search.queries", telemetry.WithDescription("Search queries served."))
+
 type searchOutput struct {
 	Body struct {
 		Hits int `json:"hits"`
 	}
 }
 
-func registerSearch(api huma.API, _ searchClient, queries metric.Int64Counter) {
+func registerSearch(api huma.API, _ searchClient) {
 	// A Huma middleware added here applies to this module only.
 	api.UseMiddleware(func(ctx huma.Context, next func(huma.Context)) {
 		ctx.SetHeader("Cache-Control", "no-store")
@@ -69,7 +71,7 @@ func registerSearch(api huma.API, _ searchClient, queries metric.Int64Counter) {
 		Path:        "/query",
 		Summary:     "Search",
 	}, func(ctx context.Context, _ *struct{}) (*searchOutput, error) {
-		queries.Add(ctx, 1)
+		queries.Inc(ctx)
 		return &searchOutput{}, nil
 	})
 }
@@ -89,9 +91,6 @@ func main() {
 		logging.Log.Fatal("Cannot set up telemetry", "err", err)
 	}
 
-	// A metric of the service's own, next to the ones gospine records.
-	queries, _ := telemetry.Meter("search").Int64Counter("search.queries")
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -102,7 +101,7 @@ func main() {
 		Config: cfg.Server,
 		APIDoc: apidoc.Info{Title: "Search API", Version: "1.0.0"},
 		Modules: []spine.Module{
-			{Prefix: "/search", Tag: "Search", Register: func(api huma.API) { registerSearch(api, search, queries) }},
+			{Prefix: "/search", Tag: "Search", Register: func(api huma.API) { registerSearch(api, search) }},
 		},
 		Status: spine.Status{
 			Probe: spine.ProbeFunc(func(ctx context.Context) error {

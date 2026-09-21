@@ -24,6 +24,9 @@ const meterName = "github.com/TaiBomb/gospine/pcms"
 // globals/<slug>, a PayloadCMS call went to.
 const collectionKey = attribute.Key("payloadcms.collection")
 
+// paginatedKey is set to false on calls that fetch the whole result set.
+const paginatedKey = attribute.Key("payloadcms.paginated")
+
 // otherCollection stands for a URL outside the API path, or a collection
 // PayloadCMS has not confirmed yet.
 const otherCollection = "_OTHER"
@@ -74,6 +77,9 @@ func (m clientMetrics) record(ctx context.Context, method, rawURL string, status
 	attrs := []attribute.KeyValue{
 		semconv.HTTPRequestMethodKey.String(method),
 		collectionKey.String(m.collections.label(collectionFromURL(m.apiPath, rawURL), statusCode)),
+	}
+	if unpaginated(rawURL) {
+		attrs = append(attrs, paginatedKey.Bool(false))
 	}
 	if statusCode != 0 {
 		attrs = append(attrs, semconv.HTTPResponseStatusCode(statusCode))
@@ -153,6 +159,13 @@ func collectionFromURL(apiPath, rawURL string) string {
 	default:
 		return segments[0]
 	}
+}
+
+// unpaginated reports whether the call turned pagination off. Calls sent
+// through the method override carry their query in the body and are missed.
+func unpaginated(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Query().Get("pagination") == "false"
 }
 
 // errorType classifies a failed attempt into a bounded set of values.

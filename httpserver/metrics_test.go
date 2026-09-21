@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TaiBomb/gospine/config"
 	"github.com/TaiBomb/gospine/telemetry"
@@ -363,5 +364,199 @@ func TestMetrics_Standalone(t *testing.T) {
 	data, _ := metricData(rm, "http.server.response.body.size")
 	if dp := data.(metricdata.Histogram[int64]).DataPoints; len(dp) != 1 || dp[0].Sum != int64(len("made")) {
 		t.Errorf("expected the response size to be recorded, got %+v", dp)
+	}
+}
+
+func TestStreamWriter_CountsMessages(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		writes      []string
+		want        int64
+	}{
+		{"one message in one write", "text/event-stream", []string{"data: 1\n\n"}, 1},
+		{"blank line in its own write", "text/event-stream", []string{"event: tick\n", "data: 1\n", "\n"}, 1},
+		{"two messages in one write", "text/event-stream", []string{"data: 1\n\ndata: 2\n\n"}, 2},
+		{"extra blank lines", "text/event-stream", []string{"data: 1\n", "\n", "\n"}, 1},
+		{"CRLF line endings", "text/event-stream", []string{"data: 1\r\n\r\n"}, 1},
+		{"unfinished message", "text/event-stream", []string{"data: 1\n"}, 0},
+		{"not a stream", "application/json", []string{"{}\n\n"}, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Header("Content-Type", tt.contentType)
+
+			w := &streamWriter{ResponseWriter: c.Writer, start: time.Now()}
+			for _, s := range tt.writes {
+				if _, err := w.WriteString(s); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+
+			if w.events != tt.want {
+				t.Fatalf("expected %d messages, got %d", tt.want, w.events)
+			}
+		})
+	}
+}
+
+// streamServer serves one SSE operation through the full server, telemetry included.
+func streamServer(t *testing.T, writeTimeout time.Duration, handler func(ctx context.Context, send sse.Sender)) *httptest.Server {
+	t.Helper()
+
+	s := newTestServer(Options{
+		Config: config.Server{ContextPath: "/"},
+		Modules: []Module{{
+			Prefix: "/stream",
+			Register: func(api huma.API) {
+				sse.Register(api, huma.Operation{
+					OperationID: "streamTicks",
+					Method:      http.MethodPost,
+					Path:        "/ticks",
+				}, map[string]any{"tick": tick{}}, func(ctx context.Context, _ *struct{}, send sse.Sender) {
+					handler(ctx, send)
+				})
+			},
+		}},
+	})
+
+	ts := httptest.NewUnstartedServer(s.Engine())
+	ts.Config.WriteTimeout = writeTimeout
+	ts.Start()
+	t.Cleanup(ts.Close)
+
+	return ts
+}
+
+// streamPoint returns the data point of an SSE histogram for the given attributes.
+func streamPoint[N int64 | float64](t *testing.T, reader sdkmetric.Reader, name string, attrs ...attribute.KeyValue) (metricdata.HistogramDataPoint[N], bool) {
+	t.Helper()
+
+	data, found := metricData(collectMetrics(t, reader), name)
+	if !found {
+		return metricdata.HistogramDataPoint[N]{}, false
+	}
+
+	want := attribute.NewSet(attrs...)
+	for _, dp := range data.(metricdata.Histogram[N]).DataPoints {
+		if dp.Attributes.Equals(&want) {
+			return dp, true
+		}
+	}
+
+	return metricdata.HistogramDataPoint[N]{}, false
+}
+
+var streamRoute = semconv.HTTPRoute("/api/stream/ticks")
+
+func TestMetrics_EventStreams(t *testing.T) {
+	reader := withMetricsReader(t)
+
+	ts := streamServer(t, 0, func(_ context.Context, send sse.Sender) {
+		for n := range 3 {
+			_ = send.Data(tick{N: n})
+		}
+	})
+
+	resp, err := http.Post(ts.URL+"/api/stream/ticks", "application/json", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	completed := streamOutcomeKey.String(streamCompleted)
+
+	if dp, ok := streamPoint[float64](t, reader, "http.server.sse.duration", streamRoute, completed); !ok || dp.Count != 1 {
+		t.Errorf("expected one completed stream, got %+v", dp)
+	}
+	if dp, ok := streamPoint[int64](t, reader, "http.server.sse.events", streamRoute, completed); !ok || dp.Count != 1 || dp.Sum != 3 {
+		t.Errorf("expected one stream of 3 messages, got %+v", dp)
+	}
+	if dp, ok := streamPoint[float64](t, reader, "http.server.sse.time_to_first_event", streamRoute); !ok || dp.Count != 1 {
+		t.Errorf("expected the first message to be timed, got %+v", dp)
+	}
+}
+
+// TestMetrics_EventStreamClosedByTheClient also guards streamWriter against
+// buffering: the client must read the first message while the handler waits.
+func TestMetrics_EventStreamClosedByTheClient(t *testing.T) {
+	reader := withMetricsReader(t)
+
+	ts := streamServer(t, 0, func(ctx context.Context, send sse.Sender) {
+		_ = send.Data(tick{N: 1})
+		<-ctx.Done()
+	})
+
+	resp, err := http.Post(ts.URL+"/api/stream/ticks", "application/json", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	firstEvent := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			if strings.HasPrefix(scanner.Text(), "data:") {
+				close(firstEvent)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-firstEvent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first message did not arrive while the handler was running: the stream is buffered")
+	}
+	_ = resp.Body.Close()
+
+	closed := streamOutcomeKey.String(streamClientClosed)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if dp, ok := streamPoint[float64](t, reader, "http.server.sse.duration", streamRoute, closed); ok && dp.Count == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected the stream to be recorded as closed by the client")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestMetrics_EventStreamsKeepTheirWriteDeadline guards streamWriter's Unwrap:
+// without it Huma cannot refresh the write deadline and the stream is cut.
+func TestMetrics_EventStreamsKeepTheirWriteDeadline(t *testing.T) {
+	withMetricsReader(t)
+
+	const writeTimeout = 200 * time.Millisecond
+
+	ts := streamServer(t, writeTimeout, func(_ context.Context, send sse.Sender) {
+		for n := range 5 {
+			if err := send.Data(tick{N: n}); err != nil {
+				return
+			}
+			time.Sleep(writeTimeout)
+		}
+	})
+
+	resp, err := http.Post(ts.URL+"/api/stream/ticks", "application/json", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	events := 0
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if strings.HasPrefix(scanner.Text(), "data:") {
+			events++
+		}
+	}
+
+	if events != 5 {
+		t.Fatalf("expected all 5 messages past the server write timeout, got %d", events)
 	}
 }

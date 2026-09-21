@@ -22,23 +22,25 @@ go get github.com/TaiBomb/gospine
 
 ## Packages
 
-| Package         | What it gives you                                                                                                 |
-|-----------------|-------------------------------------------------------------------------------------------------------------------|
-| `logging`       | JSON `slog` logger, `FromContext` adding `request_id` / `correlation_id`, `Millis`                                |
-| `config`        | `Base`, `Server`, `Client`: settings to embed in the service's `EnvConfig`                                        |
-| `httpclient`    | Shared `*http.Client` forwarding `X-Request-ID` on outbound calls                                                 |
-| `httpserver`    | `Server` with `Module`s, `/health`, `/status`, access log, recovery, `HeaderForwarder`, `PermissiveCORS`          |
-| `apidoc`        | Huma config: servers, no `$schema` injection, schema names prefixed by area                                       |
-| `paging`        | `Page[T]`, `PagedResponse[T]`, `NormalizePagination`, `NewInMemoryPage`                                           |
-| `pcms`          | PayloadCMS `Client`, internal API key auth, `Upstream` error mapping, `NewPage`, `BuildSort`, `UnmarshalRelation` |
-| `pcms/pcmstest` | `MockClient` for handler tests                                                                                    |
-| `telemetry`     | OpenTelemetry metrics: `Setup` (Prometheus or OTLP), `Meter` for the service's own metrics, `Enabled`, `Handler`  |
+| Package                   | What it gives you                                                                                                                           |
+|---------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `logging`                 | JSON `slog` logger, `FromContext` adding `request_id` / `correlation_id`, `Millis`                                                          |
+| `config`                  | `Base`, `Server`, `Client`: settings to embed in the service's `EnvConfig`                                                                  |
+| `httpclient`              | Shared `*http.Client` forwarding `X-Request-ID` on outbound calls                                                                           |
+| `httpserver`              | `Server` with `Module`s, `/health`, `/status`, access log, recovery, `HeaderForwarder`, `PermissiveCORS`                                    |
+| `apidoc`                  | Huma config: servers, no `$schema` injection, schema names prefixed by area                                                                 |
+| `paging`                  | `Page[T]`, `PagedResponse[T]`, `NormalizePagination`, `NewInMemoryPage`                                                                     |
+| `pcms`                    | PayloadCMS `Client`, internal API key auth, `Upstream` error mapping, `NewPage`, `BuildSort`, `UnmarshalRelation`                           |
+| `pcms/pcmstest`           | `MockClient` for handler tests                                                                                                              |
+| `telemetry`               | OpenTelemetry metrics: `Setup` (Prometheus or OTLP), `NewCounter` / `NewHistogram` / `NewGauge` for the service's own, `Enabled`, `Handler` |
+| `telemetry/telemetrytest` | `Collect` to read metrics in tests                                                                                                          |
 
 Dependencies between packages only go one way: `logging`, `config`, `paging`
 and `apidoc` import nothing from the module; `telemetry` uses `logging`,
 `config`; `httpclient` uses `logging`, `telemetry`; `httpserver` uses
 `logging`, `config`, `apidoc`, `telemetry`; `pcms` uses `logging`, `paging`,
-`telemetry` and `pcms` is the only package depending on gopcms (see
+`telemetry`; `telemetry/telemetrytest` uses `telemetry`, `config`; and `pcms`
+is the only package depending on gopcms (see
 [Without PayloadCMS](#without-payloadcms)).
 
 ## Usage
@@ -167,16 +169,18 @@ The rest is configuration:
 `service.version` is `Service.Version`, else the module version stamped in the
 binary.
 
-| OpenTelemetry                                                     | Prometheus                                                                           | Type      | Attributes                                                                                                     |
-|-------------------------------------------------------------------|--------------------------------------------------------------------------------------|-----------|----------------------------------------------------------------------------------------------------------------|
-| `http.server.request.duration`                                    | `http_server_request_duration_seconds`                                               | histogram | `http.request.method`, `http.route`, `http.response.status_code`, `url.scheme`, `error.type` (5xx only)        |
-| `http.server.active_requests`                                     | `http_server_active_requests`                                                        | gauge     | `http.request.method`, `url.scheme`                                                                            |
-| `http.server.request.body.size`, `http.server.response.body.size` | `http_server_request_body_size_bytes`, `http_server_response_body_size_bytes`        | histogram | as the duration                                                                                                |
-| `http.client.request.duration`, `http.client.request.body.size`   | `http_client_request_duration_seconds`, `http_client_request_body_size_bytes`        | histogram | `http.request.method`, `server.address`, `server.port`, `http.response.status_code`, `error.type`, `network.*` |
-| `payloadcms.client.request.duration`                              | `payloadcms_client_request_duration_seconds`                                         | histogram | `http.request.method`, `payloadcms.collection`, `http.response.status_code`, `error.type`                      |
-| `payloadcms.client.requests`                                      | `payloadcms_client_requests_total`                                                   | counter   | as above                                                                                                       |
-| Go runtime                                                        | `go_memory_used_bytes`, `go_goroutine_count`, `go_memory_gc_goal_bytes`, `go_*`, ... | various   |                                                                                                                |
-| resource                                                          | `target_info`                                                                        | info      | `service.name`, `service.version`, `process.runtime.*`, `telemetry.sdk.*`                                      |
+| OpenTelemetry                                                     | Prometheus                                                                           | Type      | Attributes                                                                                                        |
+|-------------------------------------------------------------------|--------------------------------------------------------------------------------------|-----------|-------------------------------------------------------------------------------------------------------------------|
+| `http.server.request.duration`                                    | `http_server_request_duration_seconds`                                               | histogram | `http.request.method`, `http.route`, `http.response.status_code`, `url.scheme`, `error.type` (5xx only)           |
+| `http.server.active_requests`                                     | `http_server_active_requests`                                                        | gauge     | `http.request.method`, `url.scheme`                                                                               |
+| `http.server.request.body.size`, `http.server.response.body.size` | `http_server_request_body_size_bytes`, `http_server_response_body_size_bytes`        | histogram | as the duration                                                                                                   |
+| `http.server.sse.duration`, `http.server.sse.events`              | `http_server_sse_duration_seconds`, `http_server_sse_events`                         | histogram | `http.route`, `sse.outcome`                                                                                       |
+| `http.server.sse.time_to_first_event`                             | `http_server_sse_time_to_first_event_seconds`                                        | histogram | `http.route`                                                                                                      |
+| `http.client.request.duration`, `http.client.request.body.size`   | `http_client_request_duration_seconds`, `http_client_request_body_size_bytes`        | histogram | `http.request.method`, `server.address`, `server.port`, `http.response.status_code`, `error.type`, `network.*`    |
+| `payloadcms.client.request.duration`                              | `payloadcms_client_request_duration_seconds`                                         | histogram | `http.request.method`, `payloadcms.collection`, `payloadcms.paginated`, `http.response.status_code`, `error.type` |
+| `payloadcms.client.requests`                                      | `payloadcms_client_requests_total`                                                   | counter   | as above                                                                                                          |
+| Go runtime                                                        | `go_memory_used_bytes`, `go_goroutine_count`, `go_memory_gc_goal_bytes`, `go_*`, ... | various   |                                                                                                                   |
+| resource                                                          | `target_info`                                                                        | info      | `service.name`, `service.version`, `process.runtime.*`, `telemetry.sdk.*`                                         |
 
 Every series also carries `otel_scope_name`, the package that records it.
 
@@ -185,20 +189,79 @@ Every series also carries `otel_scope_name`, the package that records it.
   `_OTHER`. No attribute holds a path, query, id or header.
 - `/health`, `/status` and the scrape endpoint are not recorded.
 - Server-sent event streams last as long as the client listens: they stay out
-  of the duration and response size, and still count in `active_requests` and
-  in the request size, whose `_count` is the number of streams opened.
+  of the duration and response size, and get histograms of their own by route.
+  `http.server.sse.duration` and `http.server.sse.events` tell how long a stream
+  lasted and how many messages it sent, by `sse.outcome`: `completed` when the
+  handler ended it, `client_closed` when the client left first.
+  `http.server.sse.time_to_first_event` is the wait for the first complete
+  message, whatever the handler sends first. Streams still count in
+  `active_requests` and in the request size.
 - Durations use the semconv buckets, 5ms to 10s; the server adds 30s and 60s
-  for exports and PDFs. Sizes go from 256 B to 64 MiB.
+  for exports and PDFs, and streams go from 100ms to 1h. Sizes go from 256 B to
+  64 MiB.
 - PayloadCMS calls show up twice, on purpose: in `http.client.*` by host, as
   the transport sees them, and in `payloadcms.client.*` by collection, once per
   attempt, so each retry counts. `payloadcms.collection` is the first segment
   after the API prefix (`globals/<slug>` for globals, `root` for the prefix
   itself, `_OTHER` outside it); `error.type` is `http_<status>`, `timeout`,
   `canceled`, `network` or `invalid_response`.
+- `payloadcms.paginated` is `false` on the calls that fetch the whole result
+  set (`pagination=false`), and absent otherwise. Calls sent through the gopcms
+  method override, for URLs over 2000 characters, carry their query in the
+  body and are not detected.
 - A collection name becomes a label only after PayloadCMS has answered 2xx for
   it, and at most 64 do: a service may take the collection from the caller, and
   an invented one, answered 404, stays `_OTHER`. So do the calls to a
   collection made before its first success.
+
+### Custom metrics
+
+A service declares its own metrics once, as package-level variables, and
+records them with one call. They need no wiring: they bind to the provider
+`Setup` installs, stay no-ops while telemetry is off, and follow every new
+`Setup`, as tests do. Series carry `otel_scope_name` set to the service name.
+
+```go
+var (
+	searches = telemetry.NewCounter("rsa.searches",
+		telemetry.WithLabel("search", "structures", "nearby"),
+	)
+	results = telemetry.NewHistogram[int]("rsa.search.results",
+		telemetry.WithBuckets(0, 1, 5, 10, 50, 100),
+		telemetry.WithLabel("search", "structures", "nearby"),
+	)
+	render = telemetry.NewHistogram[float64]("risorse.pdf.render.duration", telemetry.WithUnit("s"))
+	_      = telemetry.NewGauge("risorse.templates.cached", func() float64 { return float64(cache.ItemCount()) })
+)
+
+searches.Inc(ctx, "structures")
+results.Record(ctx, page.TotalDocs, "structures")
+defer render.Time(ctx)()
+```
+
+| Metric          | Records                                                            | Prometheus                                        |
+|-----------------|--------------------------------------------------------------------|---------------------------------------------------|
+| `NewCounter`    | `Inc`, `Add(n)`: a monotonic count                                 | `<name>_total`                                    |
+| `NewHistogram`  | `Record(v)` of an `int`, `int64` or `float64`; `Time()` in seconds | `<name>_<unit>_bucket`, `_sum`, `_count`          |
+| `NewGauge`      | a value read at every collection, without labels                   | `<name>_<unit>`                                   |
+
+- Labels are declared with `WithLabel` and their values passed in the same
+  order. A value outside the allowed ones is recorded as `_OTHER`; a label
+  declared without allowed values keeps its first 100 distinct values and
+  records the rest as `_OTHER`. A wrong number of values drops the
+  measurement and is reported once in the log.
+- `WithUnit` takes a UCUM unit (`s`, `By`, `{request}`). Histograms in `s`
+  default to buckets from 5ms to 60s, in `By` from 256 B to 64 MiB;
+  `WithBuckets` sets others.
+- Tests read what was recorded through `telemetrytest`; tests using it must
+  not run in parallel:
+
+```go
+m := telemetrytest.Collect(t)
+// ... call the handler ...
+if got := m.Value("rsa.searches", "search", "structures"); got != 1 { ... }
+if got := m.Count("rsa.search.results", "search", "structures"); got != 1 { ... }
+```
 
 ## Without PayloadCMS
 
@@ -221,22 +284,22 @@ Status: spine.Status{
 gospine must never be the reason a service cannot do something. What is
 specific to a service lives in the service and plugs in here:
 
-| Need                                                                   | How                                                                                                                               |
-|------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| A gin middleware on every route                                        | `Options.Middlewares` (runs after the metrics, the access log and recovery)                                                       |
-| A gin middleware on `/api` only                                        | `Options.APIMiddlewares`                                                                                                          |
-| A middleware on one module only                                        | `api.UseMiddleware(...)` inside `Module.Register` (Huma middleware)                                                               |
-| Routes outside the Huma API                                            | `Server.Engine()`                                                                                                                 |
-| Huma settings, transformers, extra operations                          | `Server.API()`                                                                                                                    |
-| Own `/health` or `/status`                                             | `Options.HealthHandler`, `Options.StatusHandler`; wrap `NewHealthHandler()` / `NewStatusHandler(...)` to extend the built-in ones |
-| Any dependency in `/status`                                            | `Status.Probe`, `ProbeFunc`                                                                                                       |
-| TLS, proxy, custom dialer or instrumented transport for outbound calls | `httpclient.Options.Transport` (any `http.RoundTripper`; `X-Request-ID` is still forwarded)                                       |
-| Any PayloadCMS collection, or a type composed around the connection    | `pcms.Client.Raw()`                                                                                                               |
-| Middlewares, OpenAPI config or HTTP client without `Server`            | `RequestLogger`, `Recovery`, `HeaderForwarder`, `Metrics`, `apidoc.NewConfig`, `httpclient.New` work on their own                 |
-| Metrics of the service's own                                           | `telemetry.Meter(name)`: same provider and exporter, no-op while telemetry is off                                                 |
-| No HTTP server metrics on one server                                   | `Options.DisableMetrics`                                                                                                          |
-| The scrape endpoint on a server built without `Server`                 | mount `telemetry.Handler()`, which answers `ok` only with the Prometheus exporter and `telemetry.port=0`                          |
-| Different settings or defaults                                         | `config.Base` is a plain struct: declare your own fields instead of embedding it                                                  |
+| Need                                                                   | How                                                                                                                                   |
+|------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| A gin middleware on every route                                        | `Options.Middlewares` (runs after the metrics, the access log and recovery)                                                           |
+| A gin middleware on `/api` only                                        | `Options.APIMiddlewares`                                                                                                              |
+| A middleware on one module only                                        | `api.UseMiddleware(...)` inside `Module.Register` (Huma middleware)                                                                   |
+| Routes outside the Huma API                                            | `Server.Engine()`                                                                                                                     |
+| Huma settings, transformers, extra operations                          | `Server.API()`                                                                                                                        |
+| Own `/health` or `/status`                                             | `Options.HealthHandler`, `Options.StatusHandler`; wrap `NewHealthHandler()` / `NewStatusHandler(...)` to extend the built-in ones     |
+| Any dependency in `/status`                                            | `Status.Probe`, `ProbeFunc`                                                                                                           |
+| TLS, proxy, custom dialer or instrumented transport for outbound calls | `httpclient.Options.Transport` (any `http.RoundTripper`; `X-Request-ID` is still forwarded)                                           |
+| Any PayloadCMS collection, or a type composed around the connection    | `pcms.Client.Raw()`                                                                                                                   |
+| Middlewares, OpenAPI config or HTTP client without `Server`            | `RequestLogger`, `Recovery`, `HeaderForwarder`, `Metrics`, `apidoc.NewConfig`, `httpclient.New` work on their own                     |
+| Metrics of the service's own                                           | `telemetry.NewCounter`, `NewHistogram`, `NewGauge` (see [Custom metrics](#custom-metrics)); `telemetry.Meter(name)` for anything else |
+| No HTTP server metrics on one server                                   | `Options.DisableMetrics`                                                                                                              |
+| The scrape endpoint on a server built without `Server`                 | mount `telemetry.Handler()`, which answers `ok` only with the Prometheus exporter and `telemetry.port=0`                              |
+| Different settings or defaults                                         | `config.Base` is a plain struct: declare your own fields instead of embedding it                                                      |
 
 The built-in routes keep their access log behavior when replaced: `/health`
 and `/status` are always logged at debug level.

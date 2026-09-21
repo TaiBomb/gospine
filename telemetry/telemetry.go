@@ -47,6 +47,8 @@ func WithReader(r sdkmetric.Reader) Option {
 
 // state is what Setup installed; nil while telemetry is off.
 type state struct {
+	// service names the meter of the custom metrics.
+	service string
 	// scrape is set when the main HTTP server must serve the metrics.
 	scrape http.Handler
 	path   string
@@ -117,14 +119,17 @@ func Setup(ctx context.Context, cfg config.Telemetry, svc Service, opts ...Optio
 	}))
 	otel.SetMeterProvider(mp)
 
-	st := &state{}
+	serviceName, _ := res.Set().Value(semconv.ServiceNameKey)
+
+	st := &state{service: serviceName.AsString()}
 	if exp.scrape != nil && cfg.Port == 0 {
 		st.scrape, st.path = exp.scrape, cfg.Path
 	}
 	installed.Store(st)
+	generation.Add(1)
+	registerGauges()
 
-	serviceName, _ := res.Set().Value(semconv.ServiceNameKey)
-	log.Info("Telemetry enabled", append([]any{"service", serviceName.AsString()}, exp.logFields...)...)
+	log.Info("Telemetry enabled", append([]any{"service", st.service}, exp.logFields...)...)
 
 	if st.scrape != nil {
 		log.Warn("Metrics served on the main HTTP server: reachable wherever its port is", "path", cfg.Path)
@@ -135,6 +140,7 @@ func Setup(ctx context.Context, cfg config.Telemetry, svc Service, opts ...Optio
 		var err error
 		once.Do(func() {
 			installed.CompareAndSwap(st, nil)
+			generation.Add(1)
 			err = errors.Join(stopServer(ctx, server), mp.Shutdown(ctx))
 		})
 		return err
