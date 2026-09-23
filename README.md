@@ -32,6 +32,7 @@ go get github.com/TaiBomb/gospine
 | `paging`                  | `Page[T]`, `PagedResponse[T]`, `NormalizePagination`, `NewInMemoryPage`                                                                     |
 | `pcms`                    | PayloadCMS `Client`, internal API key auth, `Upstream` error mapping, `NewPage`, `BuildSort`, `UnmarshalRelation`                           |
 | `pcms/pcmstest`           | `MockClient` for handler tests                                                                                                              |
+| `svcclient`               | Client for the other services: JSON calls, problem documents read back as `StatusError`, `Upstream` error mapping                           |
 | `telemetry`               | OpenTelemetry metrics: `Setup` (Prometheus or OTLP), `NewCounter` / `NewHistogram` / `NewGauge` for the service's own, `Enabled`, `Handler` |
 | `telemetry/telemetrytest` | `Collect` to read metrics in tests                                                                                                          |
 
@@ -39,7 +40,8 @@ Dependencies between packages only go one way: `logging`, `config`, `paging`
 and `apidoc` import nothing from the module; `telemetry` uses `logging`,
 `config`; `httpclient` uses `logging`, `telemetry`; `httpserver` uses
 `logging`, `config`, `apidoc`, `telemetry`; `pcms` uses `logging`, `paging`,
-`telemetry`; `telemetry/telemetrytest` uses `telemetry`, `config`; and `pcms`
+`telemetry`; `svcclient` uses `logging`; `telemetry/telemetrytest` uses
+`telemetry`, `config`; and `pcms`
 is the only package depending on gopcms (see
 [Without PayloadCMS](#without-payloadcms)).
 
@@ -262,6 +264,45 @@ m := telemetrytest.Collect(t)
 if got := m.Value("rsa.searches", "search", "structures"); got != 1 { ... }
 if got := m.Count("rsa.search.results", "search", "structures"); got != 1 { ... }
 ```
+
+## Calling other services
+
+`svcclient` calls another service of the platform. It issues its calls
+through the shared `httpclient`, with its own timeout: same connection pool,
+`X-Request-ID` forwarding and client metrics (by `server.address`) as every
+other outbound call.
+
+```go
+type EnvConfig struct {
+	config.Base
+
+	Risorse svcclient.Config `envPrefix:"risorseService."` // risorseService.baseUrl, risorseService.timeout
+}
+
+risorse, err := svcclient.New(cfg.Risorse, httpClient.HTTP())
+
+// JSON in and out
+err = risorse.PostJSON(ctx, "/api/documents/export", request, &result)
+
+// Any other body, e.g. a PDF
+resp, err := risorse.Do(ctx, svcclient.Request{Method: http.MethodPost, Path: "/api/documents/pdf", Body: request})
+if err != nil {
+	return nil, svcclient.Upstream(ctx, err, svcclient.UpstreamSpec{
+		LogMessage:     "Failed to render the PDF",
+		ClientMessage:  "failed to generate the PDF",
+		TimeoutMessage: "PDF generation timed out",
+	})
+}
+```
+
+`baseUrl` is required and includes the context path of the service; a zero
+`timeout` keeps `clientTimeout`. An answer outside 2xx fails with a
+`*StatusError` carrying the status, the problem document and the head of the
+body. `Upstream` maps a failure like `pcms.Upstream` does: 404 with
+`NotFoundMessage`, 504 on a timeout (the client's or a 504 of the service)
+with `TimeoutMessage`, 502 otherwise; what the service answered is logged,
+never returned. `Client.Ping` calls `/health`, so a client can be the `/status`
+probe. Calls are never retried: they are often non-idempotent POSTs.
 
 ## Without PayloadCMS
 
