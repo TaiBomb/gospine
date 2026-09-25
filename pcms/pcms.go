@@ -15,14 +15,15 @@ type client struct {
 }
 
 // New returns a Client that issues every call through httpClient, sharing its
-// pool and timeout, authenticated with the internal API key in the context.
+// pool and timeout, authenticated with the credentials in the context: the
+// internal API key and, when set, the caller's Authorization header.
 // Ping is the exception: gopcms issues it unauthenticated.
 func New(cfg Config, httpClient *http.Client) (Client, error) {
 	pcms, err := gopcms.New(
 		cfg.BaseURL,
 		gopcms.WithHTTPClient(httpClient),
 		gopcms.WithAPIPrefix(cfg.APIURL),
-		gopcms.WithAuth(internalAPIKeyAuth{}),
+		gopcms.WithAuth(contextAuth{}),
 		gopcms.WithObserver(newObserver(cfg)),
 	)
 	if err != nil {

@@ -108,11 +108,11 @@ func TestInternalAPIKeyFromContext_AbsentOrEmpty(t *testing.T) {
 	}
 }
 
-func TestInternalAPIKeyAuth_AppliesTheHeader(t *testing.T) {
+func TestContextAuth_AppliesTheInternalAPIKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/articles", nil)
 	ctx := ContextWithInternalAPIKey(context.Background(), "s3cr3t")
 
-	if err := (internalAPIKeyAuth{}).ApplyAuth(ctx, req); err != nil {
+	if err := (contextAuth{}).ApplyAuth(ctx, req); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -121,17 +121,79 @@ func TestInternalAPIKeyAuth_AppliesTheHeader(t *testing.T) {
 	}
 }
 
-// TestInternalAPIKeyAuth_LeavesTheRequestUnauthenticated pins the choice of not
+// TestContextAuth_LeavesTheRequestUnauthenticated pins the choice of not
 // failing a keyless call: PayloadCMS decides what is readable anonymously.
-func TestInternalAPIKeyAuth_LeavesTheRequestUnauthenticated(t *testing.T) {
+func TestContextAuth_LeavesTheRequestUnauthenticated(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/articles", nil)
 
-	if err := (internalAPIKeyAuth{}).ApplyAuth(context.Background(), req); err != nil {
+	if err := (contextAuth{}).ApplyAuth(context.Background(), req); err != nil {
 		t.Fatalf("expected a keyless context not to fail the request, got %v", err)
 	}
 
-	if req.Header.Get(InternalAPIKeyHeader) != "" {
-		t.Fatal("expected no internal API key header to be set")
+	if req.Header.Get(InternalAPIKeyHeader) != "" || req.Header.Get(AuthorizationHeader) != "" {
+		t.Fatal("expected no credential header to be set")
+	}
+}
+
+func TestAuthorizationContextRoundTrip(t *testing.T) {
+	ctx := ContextWithAuthorization(context.Background(), "Bearer t0k3n")
+
+	got, ok := AuthorizationFromContext(ctx)
+	if !ok || got != "Bearer t0k3n" {
+		t.Fatalf("expected the value to survive the round trip, got %q (ok=%v)", got, ok)
+	}
+}
+
+func TestAuthorizationFromContext_AbsentOrEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"no value at all", context.Background()},
+		{"empty value", ContextWithAuthorization(context.Background(), "")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, ok := AuthorizationFromContext(tt.ctx); ok || got != "" {
+				t.Fatalf("expected no value, got %q (ok=%v)", got, ok)
+			}
+		})
+	}
+}
+
+// TestContextAuth_AppliesBothCredentials checks that the user's
+// Authorization travels alongside the internal API key, not in its place.
+func TestContextAuth_AppliesBothCredentials(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/users/me", nil)
+	ctx := ContextWithInternalAPIKey(context.Background(), "s3cr3t")
+	ctx = ContextWithAuthorization(ctx, "Bearer t0k3n")
+
+	if err := (contextAuth{}).ApplyAuth(ctx, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := req.Header.Get(InternalAPIKeyHeader); got != "s3cr3t" {
+		t.Fatalf("expected the internal API key to be applied, got %q", got)
+	}
+	if got := req.Header.Get(AuthorizationHeader); got != "Bearer t0k3n" {
+		t.Fatalf("expected the Authorization to be applied, got %q", got)
+	}
+}
+
+// TestContextAuth_KeyOnlyAddsNoAuthorization pins the backward compatibility
+// every existing service relies on: with only the key in the context, the
+// call is exactly what it was before Authorization forwarding existed.
+func TestContextAuth_KeyOnlyAddsNoAuthorization(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/articles", nil)
+	ctx := ContextWithInternalAPIKey(context.Background(), "s3cr3t")
+
+	if err := (contextAuth{}).ApplyAuth(ctx, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, found := req.Header[AuthorizationHeader]; found {
+		t.Fatalf("expected no Authorization header, got %q", req.Header.Get(AuthorizationHeader))
 	}
 }
 
@@ -154,6 +216,29 @@ func TestNew_ForwardsTheInternalAPIKey(t *testing.T) {
 
 	if gotKey != "s3cr3t" {
 		t.Fatalf("expected PayloadCMS to receive the internal API key, got %q", gotKey)
+	}
+}
+
+// TestNew_ForwardsTheAuthorization exercises the whole wiring for a user
+// call: the Authorization in the context reaches PayloadCMS with the key.
+func TestNew_ForwardsTheAuthorization(t *testing.T) {
+	var gotKey, gotAuth string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotKey, gotAuth = r.Header.Get(InternalAPIKeyHeader), r.Header.Get(AuthorizationHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"user":null}`))
+	})
+
+	ctx := ContextWithInternalAPIKey(context.Background(), "s3cr3t")
+	ctx = ContextWithAuthorization(ctx, "Bearer t0k3n")
+
+	var out map[string]any
+	if err := c.Raw().Do(ctx, http.MethodGet, "/users/me", nil, nil, &out); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotKey != "s3cr3t" || gotAuth != "Bearer t0k3n" {
+		t.Fatalf("expected PayloadCMS to receive both credentials, got key=%q auth=%q", gotKey, gotAuth)
 	}
 }
 

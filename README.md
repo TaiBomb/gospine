@@ -30,7 +30,7 @@ go get github.com/TaiBomb/gospine
 | `httpserver`              | `Server` with `Module`s, `/health`, `/status`, access log, recovery, `HeaderForwarder`, `PermissiveCORS`                                    |
 | `apidoc`                  | Huma config: servers, no `$schema` injection, schema names prefixed by area                                                                 |
 | `paging`                  | `Page[T]`, `PagedResponse[T]`, `NormalizePagination`, `NewInMemoryPage`                                                                     |
-| `pcms`                    | PayloadCMS `Client`, internal API key auth, `Upstream` error mapping, `NewPage`, `BuildSort`, `UnmarshalRelation`                           |
+| `pcms`                    | PayloadCMS `Client`, internal API key and user auth forwarding, `Upstream` error mapping, `NewPage`, `BuildSort`, `UnmarshalRelation`       |
 | `pcms/pcmstest`           | `MockClient` for handler tests                                                                                                              |
 | `svcclient`               | Client for the other services: JSON calls, problem documents read back as `StatusError`, `Upstream` error mapping                           |
 | `telemetry`               | OpenTelemetry metrics: `Setup` (Prometheus or OTLP), `NewCounter` / `NewHistogram` / `NewGauge` for the service's own, `Enabled`, `Handler` |
@@ -84,6 +84,25 @@ server := spine.New(spine.Options{
 
 Services usually have a local `httpserver` package too: import this one as
 `spine`.
+
+### Acting as the user
+
+Calls carry the internal API key only, so PayloadCMS answers them as frontend
+reads. An operation that needs the caller's identity (a `users/me`, say) puts
+the incoming `Authorization` header in the context, and `pcms` forwards it
+next to the key on the calls made with that context:
+
+```go
+type MeInput struct {
+	Authorization string `header:"Authorization" required:"true"`
+}
+
+ctx = pcms.ContextWithAuthorization(ctx, in.Authorization)
+```
+
+Scope it to the operations that need it rather than mounting a
+`HeaderForwarder` on the whole API: every call carrying it makes PayloadCMS
+authenticate the user.
 
 ### Routes
 
